@@ -32,14 +32,17 @@ surface clear instructions in the log panel instead of crashing.
 from __future__ import annotations
 
 import dataclasses
+import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     import tkinter as tk
@@ -88,6 +91,27 @@ try:
     import torch
 except ImportError:  # pragma: no cover - optional dependency
     torch = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import langflow  # type: ignore[unused-import]
+    import langflow.server  # type: ignore[unused-import]
+except ImportError:  # pragma: no cover - optional dependency
+    langflow = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import langflow_community  # type: ignore[unused-import]
+except ImportError:  # pragma: no cover - optional dependency
+    langflow_community = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import langflow_embedded_chat  # type: ignore[unused-import]
+except ImportError:  # pragma: no cover - optional dependency
+    langflow_embedded_chat = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    from langflow.load import run_flow_from_json
+except ImportError:  # pragma: no cover - optional dependency
+    run_flow_from_json = None  # type: ignore[assignment]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -241,15 +265,36 @@ class LLMManagerGUI:
         self.godot_exec_var = tk.StringVar()
         self.godot_project_var = tk.StringVar()
         self.use_agent_var = tk.BooleanVar(value=False)
+        self.backend_choice = tk.StringVar(value="pipeline")
+
+        self.langflow_host_var = tk.StringVar(value="127.0.0.1")
+        self.langflow_port_var = tk.IntVar(value=7860)
+        self.langflow_workspace_var = tk.StringVar(
+            value=str(Path.home() / ".cache" / "autodot" / "langflow")
+        )
+        self.langflow_flow_file_var = tk.StringVar()
+        self.langflow_input_component_var = tk.StringVar(value="ChatInput")
+        self.langflow_tool_component_var = tk.StringVar(value="GodotToolToggle")
+        self.langflow_allow_tools_var = tk.BooleanVar(value=False)
+        self.langflow_status_var = tk.StringVar(value="LangFlow idle.")
+
+        self.langflow_process: Optional[subprocess.Popen[str]] = None
+        self.langflow_monitor_thread: Optional[threading.Thread] = None
+        self.langflow_server_url: Optional[str] = None
+        self.langflow_flow_path: Optional[Path] = None
 
         self.prompt_input: Optional[ScrolledText] = None
         self.prompt_output: Optional[ScrolledText] = None
         self.log_view: Optional[ScrolledText] = None
         self.status_label: Optional[ttk.Label] = None
+        self.backend_tool_checkbox: Optional[ttk.Checkbutton] = None
 
         self._build_gui()
+        self.backend_choice.trace_add("write", lambda *_: self._update_backend_controls())
+        self._update_backend_controls()
         self._process_log_queue()
         self._update_dependency_warnings()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- GUI construction ------------------------------------------------------------------
 
@@ -349,15 +394,39 @@ class LLMManagerGUI:
         # Prompt interface ------------------------------------------------------------
         prompt_frame = ttk.LabelFrame(main, text="Prompt sandbox", padding=10)
         prompt_frame.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
-        prompt_frame.rowconfigure(0, weight=1)
+        prompt_frame.rowconfigure(1, weight=1)
         prompt_frame.columnconfigure(0, weight=1)
 
+        backend_frame = ttk.Frame(prompt_frame)
+        backend_frame.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        backend_frame.columnconfigure(3, weight=1)
+
+        ttk.Label(backend_frame, text="Execution backend:").grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            backend_frame,
+            text="LangChain pipeline",
+            variable=self.backend_choice,
+            value="pipeline",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Radiobutton(
+            backend_frame,
+            text="LangFlow flow",
+            variable=self.backend_choice,
+            value="langflow",
+        ).grid(row=0, column=2, sticky="w", padx=(8, 0))
+        self.backend_tool_checkbox = ttk.Checkbutton(
+            backend_frame,
+            text="Allow Godot tools",
+            variable=self.use_agent_var,
+        )
+        self.backend_tool_checkbox.grid(row=0, column=3, sticky="w")
+
         self.prompt_input = ScrolledText(prompt_frame, height=12, wrap="word")
-        self.prompt_input.grid(row=0, column=0, sticky="nsew")
+        self.prompt_input.grid(row=1, column=0, sticky="nsew")
         self.prompt_input.insert("1.0", "You can run a quick prompt once a model has been loaded.")
 
         run_prompt_button = ttk.Button(prompt_frame, text="Run prompt", command=self._start_prompt)
-        run_prompt_button.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        run_prompt_button.grid(row=2, column=0, sticky="ew", pady=(8, 0))
 
         output_frame = ttk.LabelFrame(main, text="Model output", padding=10)
         output_frame.grid(row=2, column=1, sticky="nsew", padx=(12, 0), pady=(0, 12))
@@ -366,6 +435,73 @@ class LLMManagerGUI:
 
         self.prompt_output = ScrolledText(output_frame, height=12, wrap="word", state="disabled")
         self.prompt_output.grid(row=0, column=0, sticky="nsew")
+
+        # LangFlow -------------------------------------------------------------------
+        langflow_frame = ttk.LabelFrame(main, text="LangFlow workspace", padding=10)
+        langflow_frame.grid(row=2, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
+        langflow_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(langflow_frame, text="Host").grid(row=0, column=0, sticky="w")
+        ttk.Entry(langflow_frame, textvariable=self.langflow_host_var, width=16).grid(row=0, column=1, sticky="ew", pady=4)
+
+        ttk.Label(langflow_frame, text="Port").grid(row=0, column=2, sticky="w", padx=(12, 0))
+        ttk.Spinbox(langflow_frame, from_=1024, to=65535, textvariable=self.langflow_port_var, width=6).grid(
+            row=0,
+            column=3,
+            sticky="w",
+            pady=4,
+        )
+
+        ttk.Label(langflow_frame, text="Workspace directory").grid(row=1, column=0, sticky="w")
+        ttk.Entry(langflow_frame, textvariable=self.langflow_workspace_var).grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Button(langflow_frame, text="Browse…", command=self._browse_langflow_workspace).grid(
+            row=2, column=3, sticky="ew", padx=(12, 0), pady=4
+        )
+
+        ttk.Label(langflow_frame, text="Flow JSON").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(langflow_frame, textvariable=self.langflow_flow_file_var).grid(row=4, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Button(langflow_frame, text="Browse…", command=self._browse_langflow_flow).grid(
+            row=4, column=3, sticky="ew", padx=(12, 0), pady=4
+        )
+        ttk.Button(langflow_frame, text="Use selected flow", command=self._set_langflow_flow).grid(
+            row=5, column=0, columnspan=4, sticky="ew"
+        )
+
+        component_frame = ttk.Frame(langflow_frame)
+        component_frame.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        component_frame.columnconfigure(1, weight=1)
+        component_frame.columnconfigure(3, weight=1)
+        ttk.Label(component_frame, text="Input component").grid(row=0, column=0, sticky="w")
+        ttk.Entry(component_frame, textvariable=self.langflow_input_component_var, width=18).grid(
+            row=0, column=1, sticky="ew", padx=(4, 12)
+        )
+        ttk.Label(component_frame, text="Tool toggle component").grid(row=0, column=2, sticky="w")
+        ttk.Entry(component_frame, textvariable=self.langflow_tool_component_var, width=18).grid(
+            row=0, column=3, sticky="ew"
+        )
+
+        ttk.Checkbutton(
+            langflow_frame,
+            text="Expose Godot tools to flow",
+            variable=self.langflow_allow_tools_var,
+        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        button_row = ttk.Frame(langflow_frame)
+        button_row.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        button_row.columnconfigure(1, weight=1)
+        ttk.Button(button_row, text="Launch workspace", command=self._start_langflow_workspace).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Button(button_row, text="Stop workspace", command=self._stop_langflow_workspace).grid(
+            row=0, column=1, sticky="ew", padx=(12, 0)
+        )
+        ttk.Button(button_row, text="Open LangFlow UI", command=self._open_langflow_ui).grid(
+            row=0, column=2, sticky="ew", padx=(12, 0)
+        )
+
+        ttk.Label(langflow_frame, textvariable=self.langflow_status_var, wraplength=240, justify="left").grid(
+            row=9, column=0, columnspan=4, sticky="w", pady=(8, 0)
+        )
 
         # Log ------------------------------------------------------------------------
         log_frame = ttk.LabelFrame(main, text="Log", padding=10)
@@ -414,13 +550,29 @@ class LLMManagerGUI:
             missing.append("transformers")
         if torch is None:
             missing.append("torch")
+        if langflow is None:
+            missing.append("langflow")
+        if langflow_community is None:
+            missing.append("langflow-community")
+        if langflow_embedded_chat is None:
+            missing.append("langflow-embedded-chat")
 
         if missing:
             self._log(
                 "Missing optional dependencies: "
                 + ", ".join(missing)
-                + ". Install them with 'pip install huggingface_hub langchain langchain-community transformers torch'."
+                + ". Install them with 'pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community langflow-embedded-chat'."
             )
+
+    def _update_backend_controls(self) -> None:
+        backend = self.backend_choice.get()
+        if self.backend_tool_checkbox is not None:
+            if backend == "pipeline":
+                self.backend_tool_checkbox.state(["!disabled"])
+            else:
+                self.backend_tool_checkbox.state(["disabled"])
+        if backend != "pipeline" and self.use_agent_var.get():
+            self.use_agent_var.set(False)
 
     # -- Event handlers ----------------------------------------------------------------
 
@@ -438,6 +590,41 @@ class LLMManagerGUI:
         chosen = filedialog.askdirectory(initialdir=self.base_dir_var.get())
         if chosen:
             self.base_dir_var.set(chosen)
+
+    def _browse_langflow_workspace(self) -> None:
+        chosen = filedialog.askdirectory(initialdir=self.langflow_workspace_var.get())
+        if chosen:
+            self.langflow_workspace_var.set(chosen)
+
+    def _browse_langflow_flow(self) -> None:
+        chosen = filedialog.askopenfilename(
+            initialdir=self.langflow_flow_file_var.get() or str(Path.home()),
+            filetypes=(("LangFlow export", "*.json"), ("All files", "*")),
+        )
+        if chosen:
+            self.langflow_flow_file_var.set(chosen)
+
+    def _set_langflow_flow(self) -> None:
+        if run_flow_from_json is None:
+            messagebox.showerror(
+                "LangFlow runtime missing",
+                "Install langflow and langflow-community to execute flows.",
+            )
+            return
+
+        path_value = self.langflow_flow_file_var.get().strip()
+        if not path_value:
+            messagebox.showwarning("Flow not selected", "Choose a LangFlow flow JSON export first.")
+            return
+
+        flow_path = Path(path_value).expanduser()
+        if not flow_path.exists():
+            messagebox.showerror("Flow missing", f"Flow file {flow_path} does not exist.")
+            return
+
+        self.langflow_flow_path = flow_path
+        self.langflow_status_var.set(f"LangFlow flow ready: {flow_path.name}")
+        self._log(f"LangFlow flow set to {flow_path}")
 
     def _start_download(self) -> None:
         if snapshot_download is None:
@@ -607,11 +794,121 @@ class LLMManagerGUI:
 
         self._run_background(task)
 
-    def _start_prompt(self) -> None:
-        if self.langchain_llm is None:
-            messagebox.showinfo("Pipeline not ready", "Prepare a LangChain pipeline before running prompts.")
+    def _start_langflow_workspace(self) -> None:
+        if langflow is None:
+            messagebox.showerror(
+                "LangFlow not available",
+                "Install langflow, langflow-community and langflow-embedded-chat to launch the workspace.",
+            )
             return
 
+        if self.langflow_process is not None and self.langflow_process.poll() is None:
+            messagebox.showinfo("Already running", "LangFlow workspace is already active.")
+            return
+
+        workspace_dir = Path(self.langflow_workspace_var.get()).expanduser()
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        host = self.langflow_host_var.get().strip() or "127.0.0.1"
+        port = self.langflow_port_var.get()
+        cmd = [
+            sys.executable,
+            "-m",
+            "langflow",
+            "run",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        env = os.environ.copy()
+        env.setdefault("LANGFLOW_HOME", str(workspace_dir))
+
+        self._log(f"Launching LangFlow workspace with command: {' '.join(cmd)}")
+        self.langflow_status_var.set("Starting LangFlow workspace…")
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+        except Exception as exc:
+            self._log(f"Failed to launch LangFlow: {_format_exception(exc)}")
+            self.langflow_status_var.set("LangFlow launch failed.")
+            return
+
+        self.langflow_process = process
+        self.langflow_server_url = f"http://{host}:{port}"
+        self.langflow_status_var.set(f"LangFlow workspace running at {self.langflow_server_url}")
+        self._log(f"LangFlow workspace started at {self.langflow_server_url} (storage: {workspace_dir})")
+
+        monitor = threading.Thread(target=self._monitor_langflow_process, args=(process,), daemon=True)
+        monitor.start()
+        self.langflow_monitor_thread = monitor
+
+    def _stop_langflow_workspace(self) -> None:
+        process = self.langflow_process
+        if process is None or process.poll() is not None:
+            self._log("LangFlow workspace is not running.")
+            self.langflow_status_var.set("LangFlow idle.")
+            self.langflow_process = None
+            return
+
+        self._log("Stopping LangFlow workspace…")
+        self.langflow_status_var.set("Stopping LangFlow workspace…")
+        try:
+            process.terminate()
+        except Exception as exc:
+            self._log(f"Failed to terminate LangFlow workspace: {_format_exception(exc)}")
+            return
+
+        threading.Thread(target=self._finalize_langflow_stop, args=(process,), daemon=True).start()
+
+    def _finalize_langflow_stop(self, process: subprocess.Popen[str]) -> None:
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._log("LangFlow workspace did not exit in time; killing…")
+            process.kill()
+            process.wait()
+        self._log("LangFlow workspace stopped.")
+        if self.langflow_process is process:
+            self.langflow_process = None
+            self.langflow_server_url = None
+        self.root.after(0, lambda: self.langflow_status_var.set("LangFlow idle."))
+
+    def _monitor_langflow_process(self, process: subprocess.Popen[str]) -> None:
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    clean = line.rstrip()
+                    if clean:
+                        self._log(f"[LangFlow] {clean}")
+        finally:
+            return_code = process.wait()
+            self._log(f"LangFlow workspace exited with code {return_code}")
+            if self.langflow_process is process:
+                self.langflow_process = None
+                self.langflow_server_url = None
+                self.root.after(0, lambda: self.langflow_status_var.set("LangFlow idle."))
+
+    def _open_langflow_ui(self) -> None:
+        if langflow is None:
+            messagebox.showerror("LangFlow not available", "Install langflow to open the workspace UI.")
+            return
+
+        url = self.langflow_server_url
+        if url is None:
+            host = self.langflow_host_var.get().strip() or "127.0.0.1"
+            port = self.langflow_port_var.get()
+            url = f"http://{host}:{port}"
+
+        self._log(f"Opening LangFlow UI at {url}")
+        webbrowser.open(url)
+
+    def _start_prompt(self) -> None:
         if self.prompt_input is None or self.prompt_output is None:
             return
 
@@ -620,23 +917,46 @@ class LLMManagerGUI:
             messagebox.showwarning("Prompt missing", "Type a prompt into the sandbox first.")
             return
 
+        backend = self.backend_choice.get()
+
+        if backend == "pipeline" and self.langchain_llm is None:
+            messagebox.showinfo("Pipeline not ready", "Prepare a LangChain pipeline before running prompts.")
+            return
+
+        if backend == "langflow":
+            if run_flow_from_json is None:
+                messagebox.showerror(
+                    "LangFlow runtime missing",
+                    "Install langflow and langflow-community to execute flows.",
+                )
+                return
+            if self.langflow_flow_path is None:
+                messagebox.showwarning("Flow not ready", "Select a LangFlow flow JSON export before running prompts.")
+                return
+
         use_agent = self.use_agent_var.get()
         agent = self.langchain_agent
 
         def task() -> None:
-            executor = agent if (use_agent and agent is not None) else self.langchain_llm
-            executor_name = "LangChain agent" if executor is agent else "LangChain pipeline"
+            if backend == "langflow":
+                executor_name = "LangFlow flow"
+            else:
+                executor = agent if (use_agent and agent is not None) else self.langchain_llm
+                executor_name = "LangChain agent" if executor is agent else "LangChain pipeline"
             self._set_status("Running prompt…")
             self._log(f"Invoking {executor_name}…")
             try:
-                if executor is agent:
-                    response_payload = agent.invoke({"input": prompt})
-                    if isinstance(response_payload, dict) and "output" in response_payload:
-                        response_text = str(response_payload["output"])
-                    else:
-                        response_text = str(response_payload)
+                if backend == "langflow":
+                    response_text = self._execute_langflow_prompt(prompt)
                 else:
-                    response_text = str(self.langchain_llm.invoke(prompt))
+                    if executor is agent:
+                        response_payload = agent.invoke({"input": prompt})
+                        if isinstance(response_payload, dict) and "output" in response_payload:
+                            response_text = str(response_payload["output"])
+                        else:
+                            response_text = str(response_payload)
+                    else:
+                        response_text = str(self.langchain_llm.invoke(prompt))
             except Exception as exc:  # pragma: no cover - runtime dependent
                 self._log(f"Prompt execution failed: {_format_exception(exc)}")
                 self._set_status("Prompt failed.")
@@ -653,6 +973,50 @@ class LLMManagerGUI:
             self._set_status("Prompt completed.")
 
         self._run_background(task)
+
+    def _execute_langflow_prompt(self, prompt: str) -> str:
+        if run_flow_from_json is None or self.langflow_flow_path is None:
+            raise RuntimeError("LangFlow runtime unavailable.")
+
+        tweaks: Dict[str, Dict[str, Any]] = {}
+        input_component = self.langflow_input_component_var.get().strip()
+        if input_component:
+            tweaks.setdefault(input_component, {})["input_value"] = prompt
+
+        tool_component = self.langflow_tool_component_var.get().strip()
+        if tool_component:
+            tweaks.setdefault(tool_component, {})["enabled"] = self.langflow_allow_tools_var.get()
+
+        try:
+            result = run_flow_from_json(
+                str(self.langflow_flow_path),
+                input_value=prompt,
+                tweaks=tweaks or None,
+            )
+        except TypeError:
+            if tweaks:
+                result = run_flow_from_json(str(self.langflow_flow_path), tweaks=tweaks)
+            else:
+                result = run_flow_from_json(str(self.langflow_flow_path), input_value=prompt)
+
+        return self._stringify_langflow_result(result)
+
+    def _stringify_langflow_result(self, result: Any) -> str:
+        if isinstance(result, str):
+            return result
+        if isinstance(result, dict):
+            if "outputs" in result:
+                return self._stringify_langflow_result(result["outputs"])
+            if "output" in result:
+                return self._stringify_langflow_result(result["output"])
+            return "\n".join(f"{key}: {self._stringify_langflow_result(value)}" for key, value in result.items())
+        if isinstance(result, (list, tuple)):
+            return "\n\n".join(self._stringify_langflow_result(item) for item in result)
+        return str(result)
+
+    def _on_close(self) -> None:
+        self._stop_langflow_workspace()
+        self.root.destroy()
 
     # -- Background worker helpers ----------------------------------------------------
 
