@@ -32,6 +32,7 @@ surface clear instructions in the log panel instead of crashing.
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import inspect
 import os
 import queue
@@ -74,14 +75,16 @@ except ImportError:  # pragma: no cover - optional dependency
     AgentType = None  # type: ignore[assignment]
     initialize_agent = None  # type: ignore[assignment]
 
-LangChainToolType = None
-try:  # pragma: no cover - optional dependency
-    from langchain.tools import Tool as LangChainToolType  # type: ignore[assignment]
-except ImportError:  # pragma: no cover - optional dependency
-    try:
-        from langchain.agents import Tool as LangChainToolType  # type: ignore[assignment]
+LangChainToolType: Any | None = None
+for module_name in ("langchain.tools", "langchain.agents"):
+    try:  # pragma: no cover - optional dependency
+        module = importlib.import_module(module_name)
     except ImportError:  # pragma: no cover - optional dependency
-        LangChainToolType = None  # type: ignore[assignment]
+        continue
+    tool_candidate = getattr(module, "Tool", None)
+    if tool_candidate is not None:
+        LangChainToolType = tool_candidate
+        break
 
 try:
     from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
@@ -251,8 +254,8 @@ class LLMManagerGUI:
 
         self.log_queue: "queue.Queue[str]" = queue.Queue()
         self.worker_thread: Optional[threading.Thread] = None
-        self.langchain_llm = None
-        self.langchain_agent = None
+        self.langchain_llm: Any | None = None
+        self.langchain_agent: Any | None = None
         self.loaded_model_path: Optional[Path] = None
 
         self.model_choice = tk.StringVar(value=next(iter(DEFAULT_MODELS)))
@@ -270,9 +273,7 @@ class LLMManagerGUI:
 
         self.langflow_host_var = tk.StringVar(value="127.0.0.1")
         self.langflow_port_var = tk.IntVar(value=7860)
-        self.langflow_workspace_var = tk.StringVar(
-            value=str(Path.home() / ".cache" / "autodot" / "langflow")
-        )
+        self.langflow_workspace_var = tk.StringVar(value=str(Path.home() / ".cache" / "autodot" / "langflow"))
         self.langflow_flow_file_var = tk.StringVar()
         self.langflow_input_component_var = tk.StringVar(value="ChatInput")
         self.langflow_tool_component_var = tk.StringVar(value="GodotToolToggle")
@@ -347,7 +348,9 @@ class LLMManagerGUI:
         repo_entry.grid(row=1, column=1, sticky="ew", pady=4, padx=(12, 0))
 
         ttk.Label(selection_frame, text="Revision / branch (optional)").grid(row=0, column=2, sticky="w")
-        ttk.Entry(selection_frame, textvariable=self.revision_var, width=24).grid(row=1, column=2, sticky="ew", padx=(12, 0), pady=4)
+        ttk.Entry(selection_frame, textvariable=self.revision_var, width=24).grid(
+            row=1, column=2, sticky="ew", padx=(12, 0), pady=4
+        )
 
         ttk.Label(selection_frame, text="Destination directory").grid(row=2, column=0, sticky="w", pady=(12, 0))
         dest_entry = ttk.Entry(selection_frame, textvariable=self.base_dir_var)
@@ -356,8 +359,12 @@ class LLMManagerGUI:
         browse_button = ttk.Button(selection_frame, text="Browse…", command=self._on_browse_dir)
         browse_button.grid(row=3, column=2, sticky="ew", padx=(12, 0), pady=4)
 
-        ttk.Label(selection_frame, text="Hugging Face token (if required)").grid(row=4, column=0, sticky="w", pady=(12, 0))
-        ttk.Entry(selection_frame, textvariable=self.hf_token_var, show="*", width=30).grid(row=5, column=0, columnspan=2, sticky="ew", pady=4)
+        ttk.Label(selection_frame, text="Hugging Face token (if required)").grid(
+            row=4, column=0, sticky="w", pady=(12, 0)
+        )
+        ttk.Entry(selection_frame, textvariable=self.hf_token_var, show="*", width=30).grid(
+            row=5, column=0, columnspan=2, sticky="ew", pady=4
+        )
 
         ttk.Checkbutton(selection_frame, text="Trust remote code", variable=self.trust_remote_code).grid(
             row=4, column=2, rowspan=2, sticky="w", padx=(12, 0), pady=(12, 0)
@@ -458,7 +465,9 @@ class LLMManagerGUI:
         langflow_frame.rowconfigure(12, weight=1)
 
         ttk.Label(langflow_frame, text="Host").grid(row=0, column=0, sticky="w")
-        ttk.Entry(langflow_frame, textvariable=self.langflow_host_var, width=16).grid(row=0, column=1, sticky="ew", pady=4)
+        ttk.Entry(langflow_frame, textvariable=self.langflow_host_var, width=16).grid(
+            row=0, column=1, sticky="ew", pady=4
+        )
 
         ttk.Label(langflow_frame, text="Port").grid(row=0, column=2, sticky="w", padx=(12, 0))
         ttk.Spinbox(langflow_frame, from_=1024, to=65535, textvariable=self.langflow_port_var, width=6).grid(
@@ -469,13 +478,17 @@ class LLMManagerGUI:
         )
 
         ttk.Label(langflow_frame, text="Workspace directory").grid(row=1, column=0, sticky="w")
-        ttk.Entry(langflow_frame, textvariable=self.langflow_workspace_var).grid(row=2, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Entry(langflow_frame, textvariable=self.langflow_workspace_var).grid(
+            row=2, column=0, columnspan=3, sticky="ew", pady=4
+        )
         ttk.Button(langflow_frame, text="Browse…", command=self._browse_langflow_workspace).grid(
             row=2, column=3, sticky="ew", padx=(12, 0), pady=4
         )
 
         ttk.Label(langflow_frame, text="Flow JSON").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(langflow_frame, textvariable=self.langflow_flow_file_var).grid(row=4, column=0, columnspan=3, sticky="ew", pady=4)
+        ttk.Entry(langflow_frame, textvariable=self.langflow_flow_file_var).grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=4
+        )
         ttk.Button(langflow_frame, text="Browse…", command=self._browse_langflow_flow).grid(
             row=4, column=3, sticky="ew", padx=(12, 0), pady=4
         )
@@ -773,7 +786,9 @@ class LLMManagerGUI:
             messagebox.showwarning("Flow not ready", "Select a LangFlow flow JSON export before chatting.")
             return
         if self.backend_choice.get() != "langflow":
-            messagebox.showinfo("Switch backend", "Enable the LangFlow backend to route chat messages through the flow.")
+            messagebox.showinfo(
+                "Switch backend", "Enable the LangFlow backend to route chat messages through the flow."
+            )
             return
         if self.langflow_chat_input is None:
             return
@@ -817,7 +832,9 @@ class LLMManagerGUI:
 
         repo_id = self.custom_repo.get().strip()
         if not repo_id:
-            messagebox.showwarning("Repository missing", "Please specify a Hugging Face repository id (e.g. org/model).")
+            messagebox.showwarning(
+                "Repository missing", "Please specify a Hugging Face repository id (e.g. org/model)."
+            )
             return
 
         base_dir = Path(self.base_dir_var.get()).expanduser()
@@ -880,14 +897,18 @@ class LLMManagerGUI:
                 if torch.cuda.is_available():  # pragma: no cover - GPU unavailable in CI
                     device = "cuda"
                     dtype = torch.float16
-                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():  # pragma: no cover - macOS only
+                elif (
+                    hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+                ):  # pragma: no cover - macOS only
                     device = "mps"
                     dtype = torch.float16
                 else:
                     dtype = torch.float32
 
             try:
-                tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=trust_remote)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    str(model_dir), local_files_only=True, trust_remote_code=trust_remote
+                )
                 model = AutoModelForCausalLM.from_pretrained(
                     str(model_dir),
                     local_files_only=True,
@@ -905,7 +926,7 @@ class LLMManagerGUI:
                 self.langchain_llm = HuggingFacePipeline(pipeline=generation_pipeline)
             except Exception as exc:  # pragma: no cover - heavy runtime logic
                 self._log(f"LangChain pipeline failure: {_format_exception(exc)}")
-                self._set_status("Pipeline initialisation failed.")
+                self._set_status("Pipeline initialization failed.")
                 return
 
             self._log("LangChain pipeline ready.")
@@ -928,6 +949,7 @@ class LLMManagerGUI:
             return
 
         exec_value = self.godot_exec_var.get().strip()
+        exec_path: Optional[Path]
         if exec_value:
             exec_path = Path(exec_value).expanduser()
         else:
@@ -956,7 +978,8 @@ class LLMManagerGUI:
         def task() -> None:
             self._set_status("Registering Godot automation…")
             self._log(
-                f"Setting up Godot tool using executable {exec_path}" + (f" with project {project_path}" if project_path else "")
+                f"Setting up Godot tool using executable {exec_path}"
+                + (f" with project {project_path}" if project_path else "")
             )
 
             try:
@@ -1131,22 +1154,24 @@ class LLMManagerGUI:
             if backend == "langflow":
                 executor_name = "LangFlow flow"
             else:
-                executor = agent if (use_agent and agent is not None) else self.langchain_llm
-                executor_name = "LangChain agent" if executor is agent else "LangChain pipeline"
+                executor_name = "LangChain agent" if use_agent and agent is not None else "LangChain pipeline"
             self._set_status("Running prompt…")
             self._log(f"Invoking {executor_name}…")
             try:
                 if backend == "langflow":
                     response_text = self._execute_langflow_prompt(prompt)
                 else:
-                    if executor is agent:
+                    if use_agent and agent is not None:
                         response_payload = agent.invoke({"input": prompt})
                         if isinstance(response_payload, dict) and "output" in response_payload:
                             response_text = str(response_payload["output"])
                         else:
                             response_text = str(response_payload)
                     else:
-                        response_text = str(self.langchain_llm.invoke(prompt))
+                        llm = self.langchain_llm
+                        if llm is None:
+                            raise RuntimeError("LangChain pipeline unavailable.")
+                        response_text = str(llm.invoke(prompt))
             except Exception as exc:  # pragma: no cover - runtime dependent
                 self._log(f"Prompt execution failed: {_format_exception(exc)}")
                 self._set_status("Prompt failed.")
@@ -1158,6 +1183,7 @@ class LLMManagerGUI:
                     self.prompt_output.delete("1.0", "end")
                     self.prompt_output.insert("end", response_text)
                     self.prompt_output.configure(state="disabled")
+
             self.root.after(0, update_output)
             self._log("Prompt completed.")
             self._set_status("Prompt completed.")
@@ -1183,10 +1209,11 @@ class LLMManagerGUI:
 
         history_component = self.langflow_history_component_var.get().strip()
         if history_component and history:
-            conversation_text = "\n\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in history)
+            conversation_text = "\n\n".join(
+                f"{item.get('role', 'user')}: {item.get('content', '')}" for item in history
+            )
             history_payload = [
-                {"role": item.get("role", "user"), "content": item.get("content", "")}
-                for item in history
+                {"role": item.get("role", "user"), "content": item.get("content", "")} for item in history
             ]
             history_tweaks = tweaks.setdefault(history_component, {})
             history_tweaks.setdefault("messages", history_payload)
@@ -1194,10 +1221,7 @@ class LLMManagerGUI:
 
         component_bindings = self._build_langflow_component_bindings()
         if component_bindings:
-            self._log(
-                "Sharing components with LangFlow: "
-                + ", ".join(sorted(component_bindings.keys()))
-            )
+            self._log("Sharing components with LangFlow: " + ", ".join(sorted(component_bindings.keys())))
 
         run_params = self._get_run_flow_params()
         try:
