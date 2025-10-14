@@ -10,7 +10,9 @@ models can apply project changes automatically.
 ## Quick start
 
 ```bash
-pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community langflow-embedded-chat
+pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community
+# optional extras that surface additional LangFlow widgets
+# pip install langflow-embedded-chat
 python3 misc/scripts/autodot_llm_manager.py
 ```
 
@@ -51,16 +53,35 @@ the right-hand side of the GUI:
    GUI remembers both the path and the component names used for text input and
    Godot tool toggles, so you can adapt the tweaks sent to LangFlow.
 4. Press **Open LangFlow UI** to launch the browser-based interface in your
-   system browser.  The embedded chat widget is optional because the GUI itself
-   can route prompts through the flow once the export is selected.
+   system browser.  You can also stay inside the AutoDot helper and use the
+   embedded chat panel described below to drive the flow directly.
 
 When a flow is configured you can switch the prompt sandbox to **LangFlow flow**
 via the execution backend selector.  Prompts are passed to LangFlow using
 `run_flow_from_json`, with `input_value` targeting the configured input
 component (default `ChatInput`).  The **Expose Godot tools to flow** toggle
 updates the boolean state of the tool component (default `GodotToolToggle`),
-allowing flows to route between pure chat and automation-enabled branches.  The
-log records each invocation and any exceptions raised by the LangFlow runtime.
+allowing flows to route between pure chat and automation-enabled branches.  Two
+additional checkboxes make the locally prepared LangChain pipeline and the
+registered Godot agent available to LangFlow under the component ids
+`AutoDotLLM` and `AutoDotAgent` respectively, letting flows orchestrate the
+same LLM and automation stack exposed in the rest of the GUI.  The helper also
+sets `AUTODOT_LANGFLOW_MODEL_DIR` and `AUTODOT_LANGFLOW_FLOW` when launching the
+LangFlow server so external UIs can pick up the local context.  The log records
+each invocation and any exceptions raised by the LangFlow runtime.
+
+### Embedded LangFlow chat
+
+The **Embedded chat** panel in the LangFlow column keeps conversation history in
+sync with the selected flow.  Once a flow export is registered and the backend
+is switched to LangFlow, you can type directly into the panel and press
+**Send to flow**.  Messages are streamed through the same `run_flow_from_json`
+invocation used by the prompt sandbox, with the chat history passed to a
+dedicated component (default `ChatHistory`) so flows can branch on previous
+turns.  Responses appear inline and the full transcript remains available for
+copying into Godot or other tooling.  This keeps the entire Autodot ← LangFlow →
+LangChain → local LLM workflow bundled in a single application without requiring
+an external browser window.
 
 ## Controlling Godot from LangChain
 

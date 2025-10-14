@@ -32,6 +32,7 @@ surface clear instructions in the log panel instead of crashing.
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import os
 import queue
 import shutil
@@ -275,23 +276,37 @@ class LLMManagerGUI:
         self.langflow_flow_file_var = tk.StringVar()
         self.langflow_input_component_var = tk.StringVar(value="ChatInput")
         self.langflow_tool_component_var = tk.StringVar(value="GodotToolToggle")
+        self.langflow_history_component_var = tk.StringVar(value="ChatHistory")
         self.langflow_allow_tools_var = tk.BooleanVar(value=False)
+        self.langflow_expose_pipeline_var = tk.BooleanVar(value=True)
+        self.langflow_expose_agent_var = tk.BooleanVar(value=False)
         self.langflow_status_var = tk.StringVar(value="LangFlow idle.")
 
         self.langflow_process: Optional[subprocess.Popen[str]] = None
         self.langflow_monitor_thread: Optional[threading.Thread] = None
         self.langflow_server_url: Optional[str] = None
         self.langflow_flow_path: Optional[Path] = None
+        self.langflow_chat_history: list[dict[str, str]] = []
 
         self.prompt_input: Optional[ScrolledText] = None
         self.prompt_output: Optional[ScrolledText] = None
         self.log_view: Optional[ScrolledText] = None
         self.status_label: Optional[ttk.Label] = None
         self.backend_tool_checkbox: Optional[ttk.Checkbutton] = None
+        self.langflow_share_pipeline_checkbox: Optional[ttk.Checkbutton] = None
+        self.langflow_share_agent_checkbox: Optional[ttk.Checkbutton] = None
+        self.langflow_chat_transcript: Optional[ScrolledText] = None
+        self.langflow_chat_input: Optional[tk.Text] = None
+        self.langflow_chat_send_button: Optional[ttk.Button] = None
+
+        self._run_flow_signature_params: Optional[set[str]] = None
 
         self._build_gui()
+        self._reset_langflow_chat()
         self.backend_choice.trace_add("write", lambda *_: self._update_backend_controls())
         self._update_backend_controls()
+        self._update_langflow_component_toggles()
+        self._update_langflow_chat_controls()
         self._process_log_queue()
         self._update_dependency_warnings()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -440,6 +455,7 @@ class LLMManagerGUI:
         langflow_frame = ttk.LabelFrame(main, text="LangFlow workspace", padding=10)
         langflow_frame.grid(row=2, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
         langflow_frame.columnconfigure(1, weight=1)
+        langflow_frame.rowconfigure(12, weight=1)
 
         ttk.Label(langflow_frame, text="Host").grid(row=0, column=0, sticky="w")
         ttk.Entry(langflow_frame, textvariable=self.langflow_host_var, width=16).grid(row=0, column=1, sticky="ew", pady=4)
@@ -479,15 +495,35 @@ class LLMManagerGUI:
         ttk.Entry(component_frame, textvariable=self.langflow_tool_component_var, width=18).grid(
             row=0, column=3, sticky="ew"
         )
+        ttk.Label(component_frame, text="Chat history component").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(component_frame, textvariable=self.langflow_history_component_var, width=24).grid(
+            row=1, column=1, columnspan=3, sticky="ew", padx=(4, 0), pady=(6, 0)
+        )
+
+        self.langflow_share_pipeline_checkbox = ttk.Checkbutton(
+            langflow_frame,
+            text="Share LangChain pipeline with flow (AutoDotLLM)",
+            variable=self.langflow_expose_pipeline_var,
+            command=self._update_langflow_component_toggles,
+        )
+        self.langflow_share_pipeline_checkbox.grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self.langflow_share_agent_checkbox = ttk.Checkbutton(
+            langflow_frame,
+            text="Share LangChain agent with flow (AutoDotAgent)",
+            variable=self.langflow_expose_agent_var,
+            command=self._update_langflow_component_toggles,
+        )
+        self.langflow_share_agent_checkbox.grid(row=8, column=0, columnspan=4, sticky="w")
 
         ttk.Checkbutton(
             langflow_frame,
             text="Expose Godot tools to flow",
             variable=self.langflow_allow_tools_var,
-        ).grid(row=7, column=0, columnspan=4, sticky="w", pady=(8, 0))
+        ).grid(row=9, column=0, columnspan=4, sticky="w", pady=(8, 0))
 
         button_row = ttk.Frame(langflow_frame)
-        button_row.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        button_row.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         button_row.columnconfigure(1, weight=1)
         ttk.Button(button_row, text="Launch workspace", command=self._start_langflow_workspace).grid(
             row=0, column=0, sticky="ew"
@@ -500,8 +536,26 @@ class LLMManagerGUI:
         )
 
         ttk.Label(langflow_frame, textvariable=self.langflow_status_var, wraplength=240, justify="left").grid(
-            row=9, column=0, columnspan=4, sticky="w", pady=(8, 0)
+            row=11, column=0, columnspan=4, sticky="w", pady=(8, 0)
         )
+
+        chat_frame = ttk.LabelFrame(langflow_frame, text="Embedded chat", padding=8)
+        chat_frame.grid(row=12, column=0, columnspan=4, sticky="nsew")
+        chat_frame.rowconfigure(0, weight=1)
+        chat_frame.columnconfigure(0, weight=1)
+
+        self.langflow_chat_transcript = ScrolledText(chat_frame, height=10, wrap="word", state="disabled")
+        self.langflow_chat_transcript.grid(row=0, column=0, columnspan=3, sticky="nsew")
+
+        self.langflow_chat_input = tk.Text(chat_frame, height=3, wrap="word")
+        self.langflow_chat_input.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+        self.langflow_chat_send_button = ttk.Button(
+            chat_frame,
+            text="Send to flow",
+            command=self._send_langflow_chat,
+        )
+        self.langflow_chat_send_button.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(8, 0))
 
         # Log ------------------------------------------------------------------------
         log_frame = ttk.LabelFrame(main, text="Log", padding=10)
@@ -554,15 +608,21 @@ class LLMManagerGUI:
             missing.append("langflow")
         if langflow_community is None:
             missing.append("langflow-community")
-        if langflow_embedded_chat is None:
-            missing.append("langflow-embedded-chat")
+        chat_extras_missing = langflow_embedded_chat is None
 
-        if missing:
-            self._log(
-                "Missing optional dependencies: "
-                + ", ".join(missing)
-                + ". Install them with 'pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community langflow-embedded-chat'."
-            )
+        if missing or chat_extras_missing:
+            messages: list[str] = []
+            if missing:
+                messages.append(
+                    "Missing optional dependencies: "
+                    + ", ".join(missing)
+                    + ". Install them with 'pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community'."
+                )
+            if chat_extras_missing:
+                messages.append(
+                    "LangFlow embedded chat extras (langflow-embedded-chat) were not found; the built-in chat panel will operate without them."
+                )
+            self._log(" ".join(messages))
 
     def _update_backend_controls(self) -> None:
         backend = self.backend_choice.get()
@@ -573,6 +633,83 @@ class LLMManagerGUI:
                 self.backend_tool_checkbox.state(["disabled"])
         if backend != "pipeline" and self.use_agent_var.get():
             self.use_agent_var.set(False)
+        self._update_langflow_chat_controls()
+
+    def _update_langflow_component_toggles(self) -> None:
+        if self.langflow_share_pipeline_checkbox is not None:
+            if self.langchain_llm is None:
+                self.langflow_share_pipeline_checkbox.state(["disabled"])
+                self.langflow_expose_pipeline_var.set(False)
+            else:
+                self.langflow_share_pipeline_checkbox.state(["!disabled"])
+        if self.langflow_share_agent_checkbox is not None:
+            if self.langchain_agent is None:
+                self.langflow_share_agent_checkbox.state(["disabled"])
+                self.langflow_expose_agent_var.set(False)
+            else:
+                self.langflow_share_agent_checkbox.state(["!disabled"])
+
+    def _langflow_chat_ready(self) -> bool:
+        return run_flow_from_json is not None and self.langflow_flow_path is not None
+
+    def _reset_langflow_chat(self) -> None:
+        self.langflow_chat_history.clear()
+        intro = (
+            "LangFlow chat ready. Type a message and press Send."
+            if self._langflow_chat_ready()
+            else "Select a LangFlow flow and enable the LangFlow backend to chat."
+        )
+        if self.langflow_chat_transcript is not None:
+            self.langflow_chat_transcript.configure(state="normal")
+            self.langflow_chat_transcript.delete("1.0", "end")
+            self.langflow_chat_transcript.insert("end", intro + "\n")
+            self.langflow_chat_transcript.configure(state="disabled")
+        if self.langflow_chat_input is not None:
+            self.langflow_chat_input.configure(state="normal")
+            self.langflow_chat_input.delete("1.0", "end")
+            if not self._langflow_chat_ready():
+                self.langflow_chat_input.insert("end", "Select a LangFlow flow to enable chat.")
+
+    def _update_langflow_chat_controls(self) -> None:
+        ready = self._langflow_chat_ready() and self.backend_choice.get() == "langflow"
+        if self.langflow_chat_send_button is not None:
+            if ready:
+                self.langflow_chat_send_button.state(["!disabled"])
+            else:
+                self.langflow_chat_send_button.state(["disabled"])
+        if self.langflow_chat_input is not None:
+            self.langflow_chat_input.configure(state="normal" if ready else "disabled")
+
+    def _append_langflow_chat_message(self, role: str, message: str, display_label: Optional[str] = None) -> None:
+        entry = {"role": role, "content": message}
+        self.langflow_chat_history.append(entry)
+        if self.langflow_chat_transcript is not None:
+            label = display_label or role.title()
+            self.langflow_chat_transcript.configure(state="normal")
+            self.langflow_chat_transcript.insert("end", f"{label}: {message}\n\n")
+            self.langflow_chat_transcript.configure(state="disabled")
+            self.langflow_chat_transcript.see("end")
+
+    def _build_langflow_component_bindings(self) -> Dict[str, Any]:
+        bindings: Dict[str, Any] = {}
+        if self.langflow_expose_pipeline_var.get() and self.langchain_llm is not None:
+            bindings["AutoDotLLM"] = self.langchain_llm
+        if self.langflow_expose_agent_var.get() and self.langchain_agent is not None:
+            bindings["AutoDotAgent"] = self.langchain_agent
+        return bindings
+
+    def _get_run_flow_params(self) -> set[str]:
+        if self._run_flow_signature_params is None:
+            if run_flow_from_json is None:
+                self._run_flow_signature_params = set()
+            else:
+                try:
+                    signature = inspect.signature(run_flow_from_json)
+                except (TypeError, ValueError):
+                    self._run_flow_signature_params = set()
+                else:
+                    self._run_flow_signature_params = set(signature.parameters.keys())
+        return self._run_flow_signature_params or set()
 
     # -- Event handlers ----------------------------------------------------------------
 
@@ -625,6 +762,53 @@ class LLMManagerGUI:
         self.langflow_flow_path = flow_path
         self.langflow_status_var.set(f"LangFlow flow ready: {flow_path.name}")
         self._log(f"LangFlow flow set to {flow_path}")
+        self._reset_langflow_chat()
+        self._update_langflow_chat_controls()
+
+    def _send_langflow_chat(self) -> None:
+        if run_flow_from_json is None:
+            messagebox.showerror("LangFlow runtime missing", "Install langflow to enable chat integration.")
+            return
+        if self.langflow_flow_path is None:
+            messagebox.showwarning("Flow not ready", "Select a LangFlow flow JSON export before chatting.")
+            return
+        if self.backend_choice.get() != "langflow":
+            messagebox.showinfo("Switch backend", "Enable the LangFlow backend to route chat messages through the flow.")
+            return
+        if self.langflow_chat_input is None:
+            return
+
+        self.langflow_chat_input.configure(state="normal")
+        message = self.langflow_chat_input.get("1.0", "end").strip()
+        self.langflow_chat_input.delete("1.0", "end")
+        if not message:
+            if self._langflow_chat_ready():
+                self.langflow_chat_input.configure(state="normal")
+            else:
+                self.langflow_chat_input.configure(state="disabled")
+            return
+
+        self._append_langflow_chat_message("user", message, display_label="You")
+        history_snapshot = [dict(item) for item in self.langflow_chat_history]
+
+        def task() -> None:
+            self._set_status("Sending message to LangFlow…")
+            self._log("[LangFlow chat] Dispatching message to flow.")
+            try:
+                response_text = self._execute_langflow_prompt(message, history=history_snapshot)
+            except Exception as exc:  # pragma: no cover - depends on LangFlow runtime
+                self._log(f"LangFlow chat failed: {_format_exception(exc)}")
+                self._set_status("LangFlow chat failed.")
+                return
+
+            def update() -> None:
+                self._append_langflow_chat_message("assistant", response_text, display_label="Flow")
+
+            self.root.after(0, update)
+            self._log("[LangFlow chat] Response received.")
+            self._set_status("LangFlow chat completed.")
+
+        self._run_background(task)
 
     def _start_download(self) -> None:
         if snapshot_download is None:
@@ -727,6 +911,7 @@ class LLMManagerGUI:
             self._log("LangChain pipeline ready.")
             self._set_status("Pipeline ready.")
             self.langchain_agent = None
+            self.root.after(0, self._update_langflow_component_toggles)
 
         self._run_background(task)
 
@@ -791,6 +976,7 @@ class LLMManagerGUI:
             self.langchain_agent = agent
             self._log("Godot automation ready. Enable the checkbox to allow prompts to use it.")
             self._set_status("Automation ready.")
+            self.root.after(0, self._update_langflow_component_toggles)
 
         self._run_background(task)
 
@@ -822,6 +1008,10 @@ class LLMManagerGUI:
         ]
         env = os.environ.copy()
         env.setdefault("LANGFLOW_HOME", str(workspace_dir))
+        if self.loaded_model_path is not None:
+            env.setdefault("AUTODOT_LANGFLOW_MODEL_DIR", str(self.loaded_model_path))
+        if self.langflow_flow_path is not None:
+            env.setdefault("AUTODOT_LANGFLOW_FLOW", str(self.langflow_flow_path))
 
         self._log(f"Launching LangFlow workspace with command: {' '.join(cmd)}")
         self.langflow_status_var.set("Starting LangFlow workspace…")
@@ -974,7 +1164,11 @@ class LLMManagerGUI:
 
         self._run_background(task)
 
-    def _execute_langflow_prompt(self, prompt: str) -> str:
+    def _execute_langflow_prompt(
+        self,
+        prompt: str,
+        history: Optional[list[dict[str, str]]] = None,
+    ) -> str:
         if run_flow_from_json is None or self.langflow_flow_path is None:
             raise RuntimeError("LangFlow runtime unavailable.")
 
@@ -987,17 +1181,57 @@ class LLMManagerGUI:
         if tool_component:
             tweaks.setdefault(tool_component, {})["enabled"] = self.langflow_allow_tools_var.get()
 
+        history_component = self.langflow_history_component_var.get().strip()
+        if history_component and history:
+            conversation_text = "\n\n".join(f"{item.get('role', 'user')}: {item.get('content', '')}" for item in history)
+            history_payload = [
+                {"role": item.get("role", "user"), "content": item.get("content", "")}
+                for item in history
+            ]
+            history_tweaks = tweaks.setdefault(history_component, {})
+            history_tweaks.setdefault("messages", history_payload)
+            history_tweaks.setdefault("history", conversation_text)
+
+        component_bindings = self._build_langflow_component_bindings()
+        if component_bindings:
+            self._log(
+                "Sharing components with LangFlow: "
+                + ", ".join(sorted(component_bindings.keys()))
+            )
+
+        run_params = self._get_run_flow_params()
         try:
             result = run_flow_from_json(
                 str(self.langflow_flow_path),
                 input_value=prompt,
                 tweaks=tweaks or None,
+                **({"components": component_bindings} if component_bindings and "components" in run_params else {}),
             )
         except TypeError:
-            if tweaks:
-                result = run_flow_from_json(str(self.langflow_flow_path), tweaks=tweaks)
+            attempts = []
+            base_inputs = {"input_value": prompt}
+            if "inputs" in run_params:
+                attempts.append({"inputs": base_inputs})
+            if "components" in run_params and component_bindings:
+                attempts.append({"components": component_bindings})
+            attempts.append({})
+
+            last_error: Optional[Exception] = None
+            for extra in attempts:
+                kwargs = {**base_inputs, **extra}
+                if "inputs" in kwargs and "input_value" in kwargs:
+                    kwargs.pop("input_value")
+                if tweaks:
+                    kwargs["tweaks"] = tweaks
+                try:
+                    result = run_flow_from_json(str(self.langflow_flow_path), **kwargs)
+                    break
+                except TypeError as exc:
+                    last_error = exc
             else:
-                result = run_flow_from_json(str(self.langflow_flow_path), input_value=prompt)
+                if last_error is not None:
+                    raise last_error
+                raise
 
         return self._stringify_langflow_result(result)
 
