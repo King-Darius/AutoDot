@@ -1,0 +1,97 @@
+# .github/workflows/autodot-build-and-release.yml
+name: AutoDot — build & attach editor binaries
+
+on:
+  release:
+    # Fires for both Releases and Pre-releases when you click "Publish"
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-matrix:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- Linux editor (x86_64)
+          - name: Linux x86_64
+            os: ubuntu-latest
+            scons_cmd: scons -j ${{ steps.cpus.outputs.n }} platform=linuxbsd target=editor arch=x86_64
+            bin_path: bin/godot.linuxbsd.editor.x86_64
+            out_zip: AutoDot_${{ github.event.release.tag_name }}_Linux_x86_64.zip
+            setup_deps: |
+              sudo apt-get update
+              sudo apt-get install -y build-essential pkg-config \
+                libx11-dev libxcursor-dev libxinerama-dev libgl1-mesa-dev libglu1-mesa-dev \
+                libasound2-dev libpulse-dev libudev-dev libxi-dev libxrandr-dev
+          # ---- Windows editor (x86_64, MSVC)
+          - name: Windows x86_64
+            os: windows-latest
+            scons_cmd: scons -j %NUMBER_OF_PROCESSORS% platform=windows target=editor arch=x86_64
+            bin_path: bin\godot.windows.editor.x86_64.exe
+            out_zip: AutoDot_${{ github.event.release.tag_name }}_Windows_x86_64.zip
+            setup_deps: ""  # MSVC is preinstalled on the runner
+            use_msvc: true
+          # ---- macOS editor (arm64)
+          - name: macOS arm64
+            os: macos-14
+            scons_cmd: scons -j $(sysctl -n hw.ncpu) platform=macos target=editor arch=arm64
+            bin_path: bin/godot.macos.editor.arm64
+            out_zip: AutoDot_${{ github.event.release.tag_name }}_macOS_arm64.zip
+            setup_deps: brew update && brew install coreutils
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: CPU count (Linux/macOS)
+        id: cpus
+        if: runner.os != 'Windows'
+        run: echo "n=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python (for SCons)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install SCons
+        run: pip install "scons>=4.0"
+        shell: bash
+
+      - name: OS build deps
+        if: matrix.setup_deps != ''
+        run: ${{ matrix.setup_deps }}
+        shell: bash
+
+      - name: Enable MSVC environment (Windows)
+        if: matrix.use_msvc == true
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build editor
+        run: ${{ matrix.scons_cmd }}
+        shell: ${{ runner.os == 'Windows' && 'cmd' || 'bash' }}
+
+      - name: Package zip
+        run: |
+          mkdir -p dist
+          # Normalize path separators for Windows
+          SRC="${{ matrix.bin_path }}"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            powershell -Command "Compress-Archive -Path $env:SRC -DestinationPath dist/${{ matrix.out_zip }}"
+          else
+            zip -j "dist/${{ matrix.out_zip }}" "$SRC"
+          fi
+        shell: bash
+
+      - name: Upload to this Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
