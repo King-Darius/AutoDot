@@ -1635,6 +1635,8 @@ def to_raw_cstring(value: Union[str, List[str]]) -> str:
 
     while offset <= len(encoded):
         segment = encoded[offset : offset + MAX_LITERAL]
+        if not segment:
+            break
         offset += MAX_LITERAL
         if len(segment) == MAX_LITERAL:
             # Try to segment raw strings at double newlines to keep readable.
@@ -1659,6 +1661,9 @@ def to_raw_cstring(value: Union[str, List[str]]) -> str:
                     offset += last_11xxxxxx_index
 
         split += [segment]
+
+    if not split:
+        return 'R"<!>()<!>"'
 
     if len(split) == 1:
         return f'R"<!>({split[0].decode()})<!>"'
