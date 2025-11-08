@@ -118,6 +118,33 @@ except ImportError:  # pragma: no cover - optional dependency
     run_flow_from_json = None  # type: ignore[assignment]
 
 
+MeshyPluginModule: Any | None = None
+MeshyPluginEntryPoint: Any | None = None
+MeshyPluginModuleName: Optional[str] = None
+MeshyPluginImportErrors: list[str] = []
+for _meshy_module_name in ("autodot_meshy.plugin", "autodot_meshy", "autodot_meshy_plugin"):
+    try:  # pragma: no cover - optional dependency
+        _meshy_module = importlib.import_module(_meshy_module_name)
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        MeshyPluginImportErrors.append(f"{_meshy_module_name}: {exc}")
+        continue
+
+    for _attr_name in ("MeshyPlugin", "MeshyClient", "create_plugin", "create_client"):
+        _candidate = getattr(_meshy_module, _attr_name, None)
+        if _candidate is not None:
+            MeshyPluginModule = _meshy_module
+            MeshyPluginEntryPoint = _candidate
+            MeshyPluginModuleName = _meshy_module_name
+            break
+    else:
+        MeshyPluginImportErrors.append(
+            f"{_meshy_module_name}: module imported but MeshyPlugin/MeshyClient factory not found"
+        )
+        continue
+
+    break
+
+
 @dataclasses.dataclass(frozen=True)
 class ModelOption:
     """Represents a default model choice exposed in the GUI."""
@@ -283,6 +310,22 @@ class LLMManagerGUI:
         self.langflow_expose_agent_var = tk.BooleanVar(value=False)
         self.langflow_status_var = tk.StringVar(value="LangFlow idle.")
 
+        self.meshy_client: Any | None = None
+        self.meshy_job_id: Optional[str] = None
+        self.meshy_status_var = tk.StringVar(value="")
+        self.meshy_job_var = tk.StringVar(value="")
+        self.meshy_api_key_var = tk.StringVar(value=os.environ.get("MESHY_API_KEY", ""))
+        self.meshy_base_url_var = tk.StringVar(value=os.environ.get("MESHY_BASE_URL", ""))
+        self.meshy_output_dir_var = tk.StringVar(value=str(Path.home() / ".cache" / "autodot" / "meshy"))
+        self.meshy_task_var = tk.StringVar(value="text-to-3d")
+        self.meshy_style_var = tk.StringVar()
+        self.meshy_negative_prompt_var = tk.StringVar()
+        self.meshy_prompt_widget: Optional[tk.Text] = None
+        self.meshy_status_view: Optional[ScrolledText] = None
+        self.meshy_initialize_button: Optional[ttk.Button] = None
+        self.meshy_trigger_button: Optional[ttk.Button] = None
+        self.meshy_poll_button: Optional[ttk.Button] = None
+
         self.langflow_process: Optional[subprocess.Popen[str]] = None
         self.langflow_monitor_thread: Optional[threading.Thread] = None
         self.langflow_server_url: Optional[str] = None
@@ -310,6 +353,7 @@ class LLMManagerGUI:
         self._update_langflow_chat_controls()
         self._process_log_queue()
         self._update_dependency_warnings()
+        self._update_meshy_controls()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # -- GUI construction ------------------------------------------------------------------
@@ -463,6 +507,7 @@ class LLMManagerGUI:
         langflow_frame.grid(row=2, column=2, sticky="nsew", padx=(12, 0), pady=(0, 12))
         langflow_frame.columnconfigure(1, weight=1)
         langflow_frame.rowconfigure(12, weight=1)
+        langflow_frame.rowconfigure(13, weight=1)
 
         ttk.Label(langflow_frame, text="Host").grid(row=0, column=0, sticky="w")
         ttk.Entry(langflow_frame, textvariable=self.langflow_host_var, width=16).grid(
@@ -570,6 +615,81 @@ class LLMManagerGUI:
         )
         self.langflow_chat_send_button.grid(row=1, column=2, sticky="ew", padx=(8, 0), pady=(8, 0))
 
+        meshy_frame = ttk.LabelFrame(langflow_frame, text="Meshy plugin", padding=8)
+        meshy_frame.grid(row=13, column=0, columnspan=4, sticky="nsew", pady=(12, 0))
+        meshy_frame.columnconfigure(1, weight=1)
+        meshy_frame.columnconfigure(2, weight=1)
+        meshy_frame.columnconfigure(3, weight=1)
+        meshy_frame.rowconfigure(6, weight=1)
+        meshy_frame.rowconfigure(10, weight=1)
+
+        ttk.Label(meshy_frame, text="API key").grid(row=0, column=0, sticky="w")
+        api_entry = ttk.Entry(meshy_frame, textvariable=self.meshy_api_key_var, show="*")
+        api_entry.grid(row=0, column=1, columnspan=3, sticky="ew", pady=4)
+
+        ttk.Label(meshy_frame, text="Base URL (optional)").grid(row=1, column=0, sticky="w")
+        ttk.Entry(meshy_frame, textvariable=self.meshy_base_url_var).grid(row=1, column=1, columnspan=3, sticky="ew", pady=4)
+
+        ttk.Label(meshy_frame, text="Output directory").grid(row=2, column=0, sticky="w")
+        ttk.Entry(meshy_frame, textvariable=self.meshy_output_dir_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=4)
+        ttk.Button(meshy_frame, text="Browse…", command=self._browse_meshy_output_dir).grid(
+            row=2, column=3, sticky="ew", padx=(8, 0), pady=4
+        )
+
+        ttk.Label(meshy_frame, text="Task").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            meshy_frame,
+            textvariable=self.meshy_task_var,
+            state="readonly",
+            values=("text-to-3d", "image-to-3d"),
+        ).grid(row=3, column=1, sticky="ew", pady=(8, 0))
+        ttk.Label(meshy_frame, text="Style preset").grid(row=3, column=2, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Entry(meshy_frame, textvariable=self.meshy_style_var).grid(row=3, column=3, sticky="ew", pady=(8, 0))
+
+        ttk.Label(meshy_frame, text="Negative prompt").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(meshy_frame, textvariable=self.meshy_negative_prompt_var).grid(
+            row=4, column=1, columnspan=3, sticky="ew", pady=(6, 0)
+        )
+
+        ttk.Label(meshy_frame, text="Generation prompt").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.meshy_prompt_widget = tk.Text(meshy_frame, height=4, wrap="word")
+        self.meshy_prompt_widget.grid(row=6, column=0, columnspan=4, sticky="nsew")
+
+        button_row = ttk.Frame(meshy_frame)
+        button_row.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        button_row.columnconfigure(1, weight=1)
+
+        self.meshy_initialize_button = ttk.Button(
+            button_row,
+            text="Initialize plugin",
+            command=self._start_meshy_plugin_setup,
+        )
+        self.meshy_initialize_button.grid(row=0, column=0, sticky="ew")
+        self.meshy_trigger_button = ttk.Button(
+            button_row,
+            text="Trigger generation",
+            command=self._start_meshy_generation,
+        )
+        self.meshy_trigger_button.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        self.meshy_poll_button = ttk.Button(
+            button_row,
+            text="Refresh status",
+            command=self._start_meshy_status_refresh,
+        )
+        self.meshy_poll_button.grid(row=0, column=2, sticky="ew", padx=(8, 0))
+
+        ttk.Label(meshy_frame, text="Active job id").grid(row=8, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(meshy_frame, textvariable=self.meshy_job_var, state="readonly").grid(
+            row=8, column=1, columnspan=3, sticky="ew", pady=(8, 0)
+        )
+
+        ttk.Label(meshy_frame, textvariable=self.meshy_status_var, wraplength=260, justify="left").grid(
+            row=9, column=0, columnspan=4, sticky="w", pady=(6, 0)
+        )
+
+        self.meshy_status_view = ScrolledText(meshy_frame, height=6, wrap="word", state="disabled")
+        self.meshy_status_view.grid(row=10, column=0, columnspan=4, sticky="nsew", pady=(8, 0))
+
         # Log ------------------------------------------------------------------------
         log_frame = ttk.LabelFrame(main, text="Log", padding=10)
         log_frame.grid(row=3, column=0, columnspan=3, sticky="nsew")
@@ -622,8 +742,9 @@ class LLMManagerGUI:
         if langflow_community is None:
             missing.append("langflow-community")
         chat_extras_missing = langflow_embedded_chat is None
+        meshy_missing = MeshyPluginEntryPoint is None
 
-        if missing or chat_extras_missing:
+        if missing or chat_extras_missing or meshy_missing:
             messages: list[str] = []
             if missing:
                 messages.append(
@@ -635,7 +756,19 @@ class LLMManagerGUI:
                 messages.append(
                     "LangFlow embedded chat extras (langflow-embedded-chat) were not found; the built-in chat panel will operate without them."
                 )
+            if meshy_missing:
+                hint = "Meshy plugin runtime unavailable. Install the 'autodot-meshy' package to enable Meshy integration."
+                if MeshyPluginImportErrors:
+                    hint += " Attempted modules: " + "; ".join(MeshyPluginImportErrors)
+                messages.append(hint)
             self._log(" ".join(messages))
+            if meshy_missing:
+                self.meshy_status_var.set(
+                    "Meshy plugin not detected. Install 'autodot-meshy' and restart the manager."
+                )
+                self._append_meshy_status_log(
+                    "Meshy plugin runtime missing. Install 'autodot-meshy' to enable Meshy workflow integration."
+                )
 
     def _update_backend_controls(self) -> None:
         backend = self.backend_choice.get()
@@ -647,6 +780,436 @@ class LLMManagerGUI:
         if backend != "pipeline" and self.use_agent_var.get():
             self.use_agent_var.set(False)
         self._update_langflow_chat_controls()
+
+    def _update_meshy_controls(self) -> None:
+        buttons = [self.meshy_initialize_button, self.meshy_trigger_button, self.meshy_poll_button]
+        available = MeshyPluginEntryPoint is not None
+        job_id = self.meshy_job_id
+        for button in buttons:
+            if button is None:
+                continue
+            if not available:
+                button.state(["disabled"])
+            else:
+                button.state(["!disabled"])
+
+        if not available:
+            if not self.meshy_status_var.get():
+                self.meshy_status_var.set(
+                    "Meshy plugin not detected. Install 'autodot-meshy' to enable these controls."
+                )
+            return
+
+        if self.meshy_initialize_button is not None:
+            self.meshy_initialize_button.state(["!disabled"])
+
+        if self.meshy_client is None:
+            if self.meshy_trigger_button is not None:
+                self.meshy_trigger_button.state(["disabled"])
+            if self.meshy_poll_button is not None:
+                self.meshy_poll_button.state(["disabled"])
+            if not self.meshy_status_var.get() or "not detected" in self.meshy_status_var.get().lower():
+                self.meshy_status_var.set("Meshy plugin detected. Enter an API key and initialize the plugin.")
+            return
+
+        if self.meshy_trigger_button is not None:
+            self.meshy_trigger_button.state(["!disabled"])
+
+        if self.meshy_poll_button is not None:
+            if job_id:
+                self.meshy_poll_button.state(["!disabled"])
+            else:
+                self.meshy_poll_button.state(["disabled"])
+
+        status_parts = ["Meshy plugin ready."]
+        if job_id:
+            status_parts.append(f"Last job id: {job_id}")
+        self.meshy_status_var.set(" ".join(status_parts))
+        self.meshy_job_var.set(job_id or "")
+
+    def _append_meshy_status_log(self, message: str) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        if self.meshy_status_view is not None:
+            self.meshy_status_view.configure(state="normal")
+            self.meshy_status_view.insert("end", entry + "\n")
+            self.meshy_status_view.configure(state="disabled")
+            self.meshy_status_view.see("end")
+
+    def _browse_meshy_output_dir(self) -> None:
+        initial = self.meshy_output_dir_var.get()
+        selected = filedialog.askdirectory(title="Select Meshy output directory", initialdir=initial or None)
+        if selected:
+            self.meshy_output_dir_var.set(selected)
+
+    def _start_meshy_plugin_setup(self) -> None:
+        if MeshyPluginEntryPoint is None:
+            messagebox.showerror(
+                "Meshy plugin missing",
+                "Install the 'autodot-meshy' package to enable Meshy integration.",
+            )
+            return
+
+        api_key = self.meshy_api_key_var.get().strip() or os.environ.get("MESHY_API_KEY", "").strip()
+        if not api_key:
+            messagebox.showwarning("API key required", "Provide a Meshy API key before initializing the plugin.")
+            return
+
+        base_url = self.meshy_base_url_var.get().strip() or None
+        output_dir = Path(self.meshy_output_dir_var.get()).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        def task() -> None:
+            self._set_status("Configuring Meshy plugin…")
+            self._log("Configuring Meshy plugin runtime.")
+            self._append_meshy_status_log("Configuring Meshy plugin runtime.")
+            try:
+                client = self._construct_meshy_client(api_key, base_url, output_dir)
+            except Exception as exc:  # pragma: no cover - optional runtime dependent
+                message = f"Meshy setup failed: {_format_exception(exc)}"
+                self._log(message)
+                self._append_meshy_status_log(message)
+                self._set_status("Meshy setup failed.")
+                self.root.after(0, lambda: self.meshy_status_var.set("Meshy setup failed. Check the log for details."))
+                return
+
+            self.meshy_client = client
+            self.meshy_job_id = None
+            self._log("Meshy plugin ready.")
+            self._append_meshy_status_log("Meshy plugin ready.")
+            self._set_status("Meshy plugin ready.")
+            self.root.after(0, lambda: self.meshy_job_var.set(""))
+            self.root.after(0, self._update_meshy_controls)
+
+        self._run_background(task)
+
+    def _construct_meshy_client(self, api_key: str, base_url: Optional[str], output_dir: Path) -> Any:
+        entry = MeshyPluginEntryPoint
+        if entry is None:
+            raise RuntimeError("Meshy plugin entrypoint unavailable.")
+
+        candidates: list[Any] = []
+        if inspect.isclass(entry) or callable(entry):
+            candidates.append(entry)
+        if MeshyPluginModule is not None:
+            for name in ("create_plugin", "create_client", "make_plugin", "make_client"):
+                factory = getattr(MeshyPluginModule, name, None)
+                if factory is not None and (inspect.isclass(factory) or callable(factory)):
+                    candidates.append(factory)
+
+        if not candidates:
+            raise RuntimeError("Meshy plugin module does not expose a supported factory.")
+
+        values: Dict[str, Any] = {
+            "api_key": api_key,
+            "apikey": api_key,
+            "apiKey": api_key,
+            "token": api_key,
+            "api_token": api_key,
+            "apiToken": api_key,
+            "access_token": api_key,
+            "base_url": base_url,
+            "api_base": base_url,
+            "apiBase": base_url,
+            "endpoint": base_url,
+            "api_url": base_url,
+            "output_dir": output_dir,
+            "output_path": output_dir,
+            "workspace": output_dir,
+            "cache_dir": output_dir,
+            "assets_dir": output_dir,
+            "results_dir": output_dir,
+        }
+
+        last_error: Optional[Exception] = None
+        for candidate in candidates:
+            try:
+                return self._call_meshy_target(candidate, values)
+            except Exception as exc:  # pragma: no cover - optional runtime dependent
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Meshy plugin factory invocation failed.")
+
+    def _call_meshy_target(self, target: Any, values: Dict[str, Any]) -> Any:
+        try:
+            signature = inspect.signature(target)
+        except (TypeError, ValueError):
+            signature = None
+
+        if signature is None:
+            filtered = {k: self._sanitize_meshy_value(v) for k, v in values.items() if v is not None}
+            return target(**filtered)
+
+        params = signature.parameters
+        accepts_kwargs = any(param.kind == param.VAR_KEYWORD for param in params.values())
+        kwargs: Dict[str, Any] = {}
+
+        for name, param in params.items():
+            if name == "self":
+                continue
+            value = values.get(name)
+            if value is None:
+                continue
+            kwargs[name] = self._sanitize_meshy_value(value)
+
+        if accepts_kwargs:
+            for name, value in values.items():
+                if value is None or name in kwargs:
+                    continue
+                kwargs[name] = self._sanitize_meshy_value(value)
+
+        try:
+            return target(**kwargs)
+        except TypeError:
+            pass
+
+        positional_attempts: list[list[Any]] = []
+        api_key = values.get("api_key") or values.get("token")
+        base_url = values.get("base_url") or values.get("endpoint")
+        output_dir = values.get("output_dir") or values.get("output_path")
+
+        if api_key is not None:
+            positional_attempts.append([api_key])
+            if base_url is not None:
+                positional_attempts.append([api_key, base_url])
+                if output_dir is not None:
+                    positional_attempts.append([api_key, base_url, output_dir])
+            if output_dir is not None:
+                positional_attempts.append([api_key, output_dir])
+
+        last_error: Optional[Exception] = None
+        for attempt in positional_attempts:
+            try:
+                sanitized = [self._sanitize_meshy_value(item) for item in attempt]
+                return target(*sanitized)
+            except Exception as exc:  # pragma: no cover - optional runtime dependent
+                last_error = exc
+                continue
+
+        if last_error is not None:
+            raise last_error
+        raise
+
+    def _sanitize_meshy_value(self, value: Any) -> Any:
+        if isinstance(value, Path):
+            return str(value)
+        return value
+
+    def _start_meshy_generation(self) -> None:
+        if MeshyPluginEntryPoint is None:
+            messagebox.showerror(
+                "Meshy plugin missing",
+                "Install the 'autodot-meshy' package to enable Meshy integration.",
+            )
+            return
+        if self.meshy_client is None:
+            messagebox.showinfo("Meshy plugin not ready", "Initialize the Meshy plugin before triggering a job.")
+            return
+
+        prompt = ""
+        if self.meshy_prompt_widget is not None:
+            prompt = self.meshy_prompt_widget.get("1.0", "end").strip()
+        if not prompt:
+            messagebox.showwarning("Prompt required", "Enter a prompt before triggering a Meshy job.")
+            return
+
+        output_dir = Path(self.meshy_output_dir_var.get()).expanduser()
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        task_value = self.meshy_task_var.get().strip()
+        style_value = self.meshy_style_var.get().strip()
+        negative_value = self.meshy_negative_prompt_var.get().strip()
+
+        payload: Dict[str, Any] = {
+            "prompt": prompt,
+            "task": task_value or None,
+            "mode": task_value or None,
+            "style": style_value or None,
+            "style_preset": style_value or None,
+            "negative_prompt": negative_value or None,
+            "negativePrompt": negative_value or None,
+            "output_dir": output_dir,
+            "output_path": output_dir,
+        }
+
+        def task_runner() -> None:
+            self._set_status("Submitting Meshy job…")
+            self._log("Submitting Meshy generation job.")
+            self._append_meshy_status_log("Submitting Meshy generation job.")
+            try:
+                result = self._submit_meshy_job(payload)
+            except Exception as exc:  # pragma: no cover - optional runtime dependent
+                message = f"Meshy generation failed: {_format_exception(exc)}"
+                self._log(message)
+                self._append_meshy_status_log(message)
+                self._set_status("Meshy generation failed.")
+                self.root.after(0, lambda: self.meshy_status_var.set("Meshy generation failed."))
+                return
+
+            job_id = self._extract_meshy_job_id(result)
+            self.meshy_job_id = job_id
+            summary = self._stringify_meshy_payload(result)
+            if job_id:
+                self._log(f"Meshy job submitted: {job_id}")
+                self._append_meshy_status_log(f"Meshy job submitted: {job_id}")
+            else:
+                self._log(f"Meshy job submitted: {summary}")
+                self._append_meshy_status_log(f"Meshy job submitted: {summary}")
+            self._set_status("Meshy job submitted.")
+            self.root.after(0, lambda: self.meshy_job_var.set(job_id or ""))
+            self.root.after(0, self._update_meshy_controls)
+
+        self._run_background(task_runner)
+
+    def _submit_meshy_job(self, payload: Dict[str, Any]) -> Any:
+        client = self.meshy_client
+        if client is None:
+            raise RuntimeError("Meshy client unavailable.")
+
+        for name in (
+            "trigger_generation",
+            "start_generation",
+            "queue_generation",
+            "queue_job",
+            "submit_job",
+            "generate",
+            "submit",
+        ):
+            method = getattr(client, name, None)
+            if method is not None and callable(method):
+                return self._invoke_meshy_method(method, payload)
+
+        raise RuntimeError("Meshy client does not expose a supported submission method.")
+
+    def _invoke_meshy_method(self, method: Callable[..., Any], payload: Dict[str, Any]) -> Any:
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            filtered = {k: self._sanitize_meshy_value(v) for k, v in payload.items() if v is not None}
+            return method(**filtered)
+
+        params = signature.parameters
+        accepts_kwargs = any(param.kind == param.VAR_KEYWORD for param in params.values())
+        kwargs: Dict[str, Any] = {}
+        prompt_value = payload.get("prompt")
+        prompt_assigned = False
+
+        for name, param in params.items():
+            if name == "self":
+                continue
+            lower_name = name.lower()
+            if lower_name in {"prompt", "text", "text_prompt", "input_text", "instruction"} and prompt_value is not None:
+                kwargs[name] = prompt_value
+                prompt_assigned = True
+                continue
+            value = payload.get(name)
+            if value is None:
+                continue
+            kwargs[name] = self._sanitize_meshy_value(value)
+
+        if not prompt_assigned and prompt_value is not None:
+            non_self_params = [name for name in params if name != "self"]
+            if non_self_params:
+                first = non_self_params[0]
+                if first not in kwargs:
+                    kwargs[first] = prompt_value
+                    prompt_assigned = True
+
+        if accepts_kwargs:
+            for name, value in payload.items():
+                if value is None or name in kwargs:
+                    continue
+                kwargs[name] = self._sanitize_meshy_value(value)
+
+        try:
+            return method(**kwargs)
+        except TypeError:
+            if prompt_value is not None:
+                extras = {k: self._sanitize_meshy_value(v) for k, v in payload.items() if k != "prompt" and v is not None}
+                return method(prompt_value, **extras)
+            raise
+
+    def _extract_meshy_job_id(self, result: Any) -> Optional[str]:
+        if isinstance(result, str):
+            return result.strip() or None
+        if isinstance(result, dict):
+            for key in ("job_id", "jobId", "id", "task_id", "taskId"):
+                value = result.get(key)
+                if value:
+                    return str(value)
+        if isinstance(result, (list, tuple)) and result:
+            return self._extract_meshy_job_id(result[0])
+        return None
+
+    def _stringify_meshy_payload(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload
+        if isinstance(payload, dict):
+            return ", ".join(f"{key}={self._stringify_meshy_payload(value)}" for key, value in payload.items())
+        if isinstance(payload, (list, tuple)):
+            return ", ".join(self._stringify_meshy_payload(item) for item in payload)
+        return str(payload)
+
+    def _start_meshy_status_refresh(self) -> None:
+        if MeshyPluginEntryPoint is None:
+            messagebox.showerror(
+                "Meshy plugin missing",
+                "Install the 'autodot-meshy' package to enable Meshy integration.",
+            )
+            return
+        if self.meshy_client is None:
+            messagebox.showinfo("Meshy plugin not ready", "Initialize the Meshy plugin before polling status.")
+            return
+        if not self.meshy_job_id:
+            messagebox.showwarning("Job id missing", "Submit a Meshy job before refreshing its status.")
+            return
+
+        job_id = self.meshy_job_id
+
+        def task_runner() -> None:
+            assert job_id is not None
+            self._set_status("Querying Meshy job status…")
+            self._log(f"Querying Meshy status for {job_id}.")
+            self._append_meshy_status_log(f"Querying Meshy status for {job_id}.")
+            try:
+                status = self._query_meshy_job(job_id)
+            except Exception as exc:  # pragma: no cover - optional runtime dependent
+                message = f"Meshy status check failed: {_format_exception(exc)}"
+                self._log(message)
+                self._append_meshy_status_log(message)
+                self._set_status("Meshy status check failed.")
+                return
+
+            summary = self._stringify_meshy_payload(status)
+            self._log(f"Meshy status for {job_id}: {summary}")
+            self._append_meshy_status_log(f"Meshy status for {job_id}: {summary}")
+            self._set_status("Meshy status refreshed.")
+            self.root.after(0, lambda: self.meshy_status_var.set(f"Meshy job {job_id}: {summary}"))
+
+        self._run_background(task_runner)
+
+    def _query_meshy_job(self, job_id: str) -> Any:
+        client = self.meshy_client
+        if client is None:
+            raise RuntimeError("Meshy client unavailable.")
+
+        payload: Dict[str, Any] = {
+            "job_id": job_id,
+            "jobId": job_id,
+            "id": job_id,
+            "task_id": job_id,
+            "taskId": job_id,
+        }
+
+        for name in ("get_status", "status", "fetch_status", "poll_job", "get_job", "retrieve_job"):
+            method = getattr(client, name, None)
+            if method is not None and callable(method):
+                return self._invoke_meshy_method(method, payload)
+
+        raise RuntimeError("Meshy client does not expose a supported status method.")
 
     def _update_langflow_component_toggles(self) -> None:
         if self.langflow_share_pipeline_checkbox is not None:
