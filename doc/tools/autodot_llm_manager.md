@@ -13,6 +13,8 @@ models can apply project changes automatically.
 pip install huggingface_hub langchain langchain-community transformers torch langflow langflow-community
 # optional extras that surface additional LangFlow widgets
 # pip install langflow-embedded-chat
+# optional Meshy plugin bridge (see section below)
+# pip install autodot-meshy
 python3 misc/scripts/autodot_llm_manager.py
 ```
 
@@ -82,6 +84,45 @@ turns.  Responses appear inline and the full transcript remains available for
 copying into Godot or other tooling.  This keeps the entire Autodot ← LangFlow →
 LangChain → local LLM workflow bundled in a single application without requiring
 an external browser window.
+
+## Meshy plugin integration
+
+The LLM manager can now drive the optional AutoDot Meshy plugin when it is
+installed.  On startup the script probes for one of the following modules:
+`autodot_meshy.plugin`, `autodot_meshy` or `autodot_meshy_plugin`.  When none of
+them are available the log panel and the Meshy status box at the bottom of the
+LangFlow column emit a clear hint to install the `autodot-meshy` package.  After
+installation restart the helper so it can import the plugin factory or client
+class that the package exposes.
+
+Provide your Meshy API key and (optionally) a custom base URL in the new **Meshy
+plugin** panel.  The GUI reads the `MESHY_API_KEY` and `MESHY_BASE_URL`
+environment variables at launch, so you can keep sensitive credentials out of
+the UI while still pre-populating the form.  The output directory defaults to
+`~/.cache/autodot/meshy`, but you can switch it through the **Browse…** button
+whenever you want the plugin to drop generated assets in a shared folder that
+LangFlow or downstream tooling can consume.
+
+Press **Initialize plugin** after filling the API key to load the optional
+module.  The manager adapts to different factory entry points by inspecting the
+available call signatures, so custom builds of the plugin continue to function
+as long as they expose a `MeshyPlugin`, `MeshyClient`, `create_plugin` or
+`create_client` symbol.  Once the client is ready the **Trigger generation**
+button submits a Meshy job using the prompt text, task selector (`text-to-3d` or
+`image-to-3d`), style preset and negative prompt fields.  The resulting job id is
+captured in the GUI and appended to both the global log and the dedicated Meshy
+status transcript, making it easy to keep track of concurrent requests.
+
+Use **Refresh status** whenever you want to poll the job.  The manager looks for
+common methods such as `get_status`, `status`, `fetch_status`, `poll_job` and
+`get_job`, logs the latest server response and mirrors the summary inside the
+Meshy panel.  This gives creators immediate feedback about queued, running or
+completed tasks without leaving the AutoDot setup workflow.  Because the plugin
+controls share the same cache and logging facilities as the LangFlow widgets you
+can keep the Meshy plugin working in tandem with LangFlow flows or Godot
+automation: point LangFlow to the Meshy output directory, share the generated
+asset paths through a flow tweak and continue orchestrating the rest of your
+pipeline from the same application.
 
 ## Controlling Godot from LangChain
 
