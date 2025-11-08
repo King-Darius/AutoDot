@@ -830,11 +830,19 @@ class LLMManagerGUI:
     def _append_meshy_status_log(self, message: str) -> None:
         timestamp = time.strftime("%H:%M:%S")
         entry = f"[{timestamp}] {message}"
-        if self.meshy_status_view is not None:
-            self.meshy_status_view.configure(state="normal")
-            self.meshy_status_view.insert("end", entry + "\n")
-            self.meshy_status_view.configure(state="disabled")
-            self.meshy_status_view.see("end")
+        def append() -> None:
+            if self.meshy_status_view is not None:
+                self.meshy_status_view.configure(state="normal")
+                self.meshy_status_view.insert("end", entry + "\n")
+                self.meshy_status_view.configure(state="disabled")
+                self.meshy_status_view.see("end")
+
+        # Tk widgets must be manipulated from the main thread. Schedule the
+        # update via ``after`` so worker threads can safely request log writes.
+        if getattr(self, "root", None) is not None:
+            self.root.after(0, append)
+        else:
+            append()
 
     def _browse_meshy_output_dir(self) -> None:
         initial = self.meshy_output_dir_var.get()
